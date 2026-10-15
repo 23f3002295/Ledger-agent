@@ -4,8 +4,7 @@ import json
 from flask import Flask, request, jsonify
 from google import genai
 from ledger import calculate
-from dotenv import load_dotenv
-load_dotenv()
+os.getenv("GEMINI_API_KEY")
 
 app = Flask(__name__)
 
