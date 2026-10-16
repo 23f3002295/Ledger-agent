@@ -4,11 +4,10 @@ import json
 from flask import Flask, request, jsonify
 from google import genai
 from ledger import calculate
-os.getenv("GEMINI_API_KEY")
 
 app = Flask(__name__)
 
-# Configure Gemini using an environment variable.
+# Configure Gemini using the environment variable.
 client = genai.Client(
     api_key=os.getenv("GEMINI_API_KEY")
 )
@@ -30,28 +29,48 @@ Return ONLY a valid JSON object with these fields:
 Use null for filters that are not mentioned.
 
 Allowed metrics:
-revenue, refunds, order_count, customer_count, units_sold,
-product_revenue, revenue_by_region, top_product
+revenue, refunds, order_count, refunded_order_count,
+customer_count, units_sold, product_revenue,
+revenue_by_region, top_product
 
 Rules:
 1. Revenue means the sum of amounts for paid orders only.
 2. Refunds means the sum of amounts for orders whose current
    status is refunded.
-3. Convert questions about number of paid orders to order_count.
-4. Convert questions about distinct customers to customer_count.
-5. Convert questions about units sold to units_sold.
-6. Use product_revenue for a breakdown of revenue by product.
-7. Use revenue_by_region for a breakdown of revenue by region.
-8. Use top_product for the product with the most units sold.
-9. Dates must use YYYY-MM-DD format.
-10. end_date_exclusive is the day AFTER the requested end date.
-11. Interpret business dates using Asia/Kolkata.
-12. If a question asks for a specific product, region, or customer,
+3. Questions asking for the number of paid orders use order_count.
+4. Questions asking how many orders were refunded use
+   refunded_order_count.
+5. Count each unique order only once.
+6. Questions about distinct customers use customer_count.
+7. Questions about units sold use units_sold.
+8. Use product_revenue for a breakdown of revenue by product.
+9. Use revenue_by_region for a breakdown of revenue by region.
+10. Use top_product for the product with the most units sold.
+11. Dates must use YYYY-MM-DD format.
+12. end_date_exclusive is the day AFTER the requested end date.
+13. Interpret business dates using Asia/Kolkata.
+14. If a question asks for a specific product, region, or customer,
     set the matching filter.
-13. If no date range is specified, leave both date fields null.
-14. Do not invent ledger figures or answer the question yourself.
-15. If the question is unclear or unrelated to the ledger,
+15. If no date range is specified, leave both date fields null.
+16. Do not invent ledger figures or answer the question yourself.
+17. If the question is unclear or unrelated to the ledger,
     return {"metric": "invalid"}.
+
+For questions about refunded order counts, use the metric
+refunded_order_count, not refunds.
+
+Example question:
+"How many orders from Central were refunded in March 2026?"
+
+Example JSON:
+{
+  "metric": "refunded_order_count",
+  "region": "Central",
+  "product": null,
+  "customer": null,
+  "start_date": "2026-03-01",
+  "end_date_exclusive": "2026-04-01"
+}
 
 Example question:
 "What was the revenue in North during March 2026?"
@@ -137,6 +156,7 @@ def answer_question():
             "revenue",
             "refunds",
             "order_count",
+            "refunded_order_count",
             "customer_count",
             "units_sold",
             "product_revenue",
@@ -149,7 +169,6 @@ def answer_question():
                 "answer": "I could not interpret that ledger question."
             }), 400
 
-        # Only accept the supported fields from the AI plan.
         safe_plan = {
             key: plan.get(key)
             for key in (
@@ -169,7 +188,7 @@ def answer_question():
     except (ValueError, KeyError, TypeError) as exc:
         app.logger.warning("Invalid question or plan: %s", exc)
         return jsonify({
-            "answer": "I could not process that question."
+            "answer": "I could not process the question."
         }), 400
 
     except Exception:

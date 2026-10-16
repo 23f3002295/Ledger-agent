@@ -2,109 +2,115 @@
 import json
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, date
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-IST = ZoneInfo("Asia/Kolkata")
+BASE_DIR = Path(__file__).resolve().parent
 
-with open("orders.json", encoding="utf-8") as f:
+with open(BASE_DIR / "orders.json", "r", encoding="utf-8") as f:
     ORDERS = json.load(f)
 
-with open("rates.json", encoding="utf-8") as f:
+with open(BASE_DIR / "rates.json", "r", encoding="utf-8") as f:
     RATES = json.load(f)
+
+# Support either the full rates response or the rates dictionary.
+if "usd_per_unit" in RATES:
+    RATES = RATES["usd_per_unit"]
+
+INDIA_TZ = ZoneInfo("Asia/Kolkata")
 
 
 def order_date(order):
-    """Convert an order's timestamp to its Indian business date."""
-    value = order["created_at"].replace("Z", "+00:00")
-    dt = datetime.fromisoformat(value)
+    """Return the order's creation date in India."""
+    value = order["created_at"]
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
 
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=IST)
+        dt = dt.replace(tzinfo=INDIA_TZ)
 
-    return dt.astimezone(IST).date()
+    return dt.astimezone(INDIA_TZ).date()
 
 
 def usd_amount(order):
-    """Convert an order amount to USD using the supplied rates."""
+    """Convert the order amount into USD."""
     amount = Decimal(str(order["amount"]))
     rate = Decimal(str(RATES[order["currency"]]))
     return amount * rate
 
 
 def money(value):
-    """Round money to two decimal places."""
+    """Round a monetary result to two decimal places."""
     return float(
-        Decimal(value).quantize(
+        Decimal(str(value)).quantize(
             Decimal("0.01"),
             rounding=ROUND_HALF_UP
         )
     )
 
 
-def calculate(plan):
+def current_orders(orders):
     """
-    plan example:
-    {
-        "metric": "revenue",
-        "region": "North",
-        "start_date": "2026-03-01",
-        "end_date_exclusive": "2026-04-01"
-    }
+    Keep the latest updated row for each order ID.
+    If timestamps tie, retain the last row encountered.
     """
+    latest = {}
 
+    for order in orders:
+        order_id = order["id"]
+        updated = datetime.fromisoformat(
+            order["updated_at"].replace("Z", "+00:00")
+        )
+
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=INDIA_TZ)
+
+        if (
+            order_id not in latest
+            or updated >= latest[order_id][0]
+        ):
+            latest[order_id] = (updated, order)
+
+    return [item[1] for item in latest.values()]
+
+
+# Deduplicate once before calculating any metric.
+ORDERS = current_orders(ORDERS)
+
+
+def calculate(plan):
     metric = plan.get("metric")
 
-    supported = {
-        "revenue",
-        "refunds",
-        "order_count",
-        "customer_count",
-        "units_sold",
-        "product_revenue",
-        "revenue_by_region",
-        "top_product"
-    }
+    region = plan.get("region")
+    product = plan.get("product")
+    customer = plan.get("customer")
+    start_date = plan.get("start_date")
+    end_date_exclusive = plan.get("end_date_exclusive")
 
-    if metric not in supported:
-        raise ValueError("Unsupported metric")
-
-    start = (
-        date.fromisoformat(plan["start_date"])
-        if plan.get("start_date") else None
-    )
-
+    start = date.fromisoformat(start_date) if start_date else None
     end = (
-        date.fromisoformat(plan["end_date_exclusive"])
-        if plan.get("end_date_exclusive") else None
+        date.fromisoformat(end_date_exclusive)
+        if end_date_exclusive
+        else None
     )
 
     filtered = []
 
     for order in ORDERS:
-        if plan.get("region") and (
-            order["region"].casefold()
-            != plan["region"].casefold()
-        ):
+        if region and order["region"].casefold() != region.casefold():
             continue
 
-        if plan.get("product") and (
-            order["product"].casefold()
-            != plan["product"].casefold()
-        ):
+        if product and order["product"].casefold() != product.casefold():
             continue
 
-        if plan.get("customer") and (
-            order["customer"].casefold()
-            != plan["customer"].casefold()
-        ):
+        if customer and order["customer"].casefold() != customer.casefold():
             continue
 
-        current_date = order_date(order)
+        created = order_date(order)
 
-        if start and current_date < start:
+        if start and created < start:
             continue
 
-        if end and current_date >= end:
+        if end and created >= end:
             continue
 
         filtered.append(order)
@@ -120,7 +126,14 @@ def calculate(plan):
         )
         return money(total)
 
-    if metric == "refunds":
+    elif metric == "refunded_order_count":
+        return sum(
+            1
+            for o in filtered
+            if o["status"] == "refunded"
+        )
+
+    elif metric == "refunds":
         total = sum(
             (
                 usd_amount(o)
@@ -131,63 +144,65 @@ def calculate(plan):
         )
         return money(total)
 
-    if metric == "order_count":
-        return sum(o["status"] == "paid" for o in filtered)
+    elif metric == "order_count":
+        return sum(
+            1 for o in filtered
+            if o["status"] == "paid"
+        )
 
-    if metric == "customer_count":
+    elif metric == "customer_count":
         return len({
             o["customer"]
             for o in filtered
             if o["status"] == "paid"
         })
 
-    if metric == "units_sold":
+    elif metric == "units_sold":
         return sum(
-            o["qty"] for o in filtered
+            o["qty"]
+            for o in filtered
             if o["status"] == "paid"
         )
 
-    if metric == "product_revenue":
+    elif metric == "product_revenue":
         totals = {}
 
         for o in filtered:
             if o["status"] == "paid":
-                product = o["product"]
-                totals[product] = (
-                    totals.get(product, Decimal("0"))
+                name = o["product"]
+                totals[name] = (
+                    totals.get(name, Decimal("0"))
                     + usd_amount(o)
                 )
 
         return {
-            product: money(total)
-            for product, total in sorted(totals.items())
+            name: money(total)
+            for name, total in sorted(totals.items())
         }
 
-    if metric == "revenue_by_region":
+    elif metric == "revenue_by_region":
         totals = {}
 
         for o in filtered:
             if o["status"] == "paid":
-                region = o["region"]
-                totals[region] = (
-                    totals.get(region, Decimal("0"))
+                name = o["region"]
+                totals[name] = (
+                    totals.get(name, Decimal("0"))
                     + usd_amount(o)
                 )
 
         return {
-            region: money(total)
-            for region, total in sorted(totals.items())
+            name: money(total)
+            for name, total in sorted(totals.items())
         }
 
-    if metric == "top_product":
+    elif metric == "top_product":
         totals = {}
 
         for o in filtered:
             if o["status"] == "paid":
-                product = o["product"]
-                totals[product] = (
-                    totals.get(product, 0) + o["qty"]
-                )
+                name = o["product"]
+                totals[name] = totals.get(name, 0) + o["qty"]
 
         if not totals:
             return None
@@ -200,13 +215,31 @@ def calculate(plan):
             if qty == highest
         ]
 
+    return None
+
 
 if __name__ == "__main__":
     example = {
         "metric": "revenue",
         "region": "North",
+        "product": None,
+        "customer": None,
         "start_date": "2026-03-01",
         "end_date_exclusive": "2026-04-01"
     }
 
     print("Example result:", calculate(example))
+
+    refunded_example = {
+        "metric": "refunded_order_count",
+        "region": "Central",
+        "product": None,
+        "customer": None,
+        "start_date": "2026-03-01",
+        "end_date_exclusive": "2026-04-01"
+    }
+
+    print(
+        "Central refunded orders in March 2026:",
+        calculate(refunded_example)
+    )
